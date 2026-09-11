@@ -1,9 +1,8 @@
 'use strict';
-const semver = require('semver');
-const settings = require('./Settings');
-import axios from 'axios';
+import semver from 'semver';
+import settings, {getEpVersion} from './Settings';
 const headers = {
-  'User-Agent': 'Etherpad/' + settings.getEpVersion(),
+  'User-Agent': 'Etherpad/' + getEpVersion(),
 }
 
 type Infos = {
@@ -14,15 +13,17 @@ type Infos = {
 const updateInterval = 60 * 60 * 1000; // 1 hour
 let infos: Infos;
 let lastLoadingTime: number | null = null;
+let loggedDisabled = false;
 
 const loadEtherpadInformations = () => {
   if (lastLoadingTime !== null && Date.now() - lastLoadingTime < updateInterval) {
     return infos;
   }
 
-  return axios.get(`${settings.updateServer}/info.json`, {headers: headers})
-  .then(async (resp: any) => {
-    infos = await resp.data;
+  return fetch(`${settings.updateServer}/info.json`, {headers})
+  .then(async (resp) => {
+    if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
+    infos = await resp.json() as Infos;
     if (infos === undefined || infos === null) {
       await Promise.reject("Could not retrieve current version")
       return
@@ -37,15 +38,16 @@ const loadEtherpadInformations = () => {
 }
 
 
-exports.getLatestVersion = () => {
-  exports.needsUpdate().catch();
+export const getLatestVersion = () => {
+  if (!settings.privacy.updateCheck) return undefined;
+  needsUpdate().catch();
   return infos?.latestVersion;
 };
 
-exports.needsUpdate = async (cb?: Function) => {
+const needsUpdate = async (cb?: Function) => {
   try {
     const info = await loadEtherpadInformations()
-    if (semver.gt(info!.latestVersion, settings.getEpVersion())) {
+    if (semver.gt(info!.latestVersion, getEpVersion())) {
       if (cb) return cb(true);
     }
   } catch (err) {
@@ -54,10 +56,17 @@ exports.needsUpdate = async (cb?: Function) => {
   }
 };
 
-exports.check = () => {
-  exports.needsUpdate((needsUpdate: boolean) => {
+export const check = () => {
+  if (!settings.privacy.updateCheck) {
+    if (!loggedDisabled) {
+      console.info('Update check disabled by privacy.updateCheck=false (see PRIVACY.md)');
+      loggedDisabled = true;
+    }
+    return;
+  }
+  needsUpdate((needsUpdate: boolean) => {
     if (needsUpdate) {
       console.warn(`Update available: Download the actual version ${infos.latestVersion}`);
     }
-  });
+  }).then(()=>{});
 };

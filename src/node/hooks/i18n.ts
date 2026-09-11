@@ -4,12 +4,12 @@ import type {MapArrayType} from "../types/MapType";
 import {I18nPluginDefs} from "../types/I18nPluginDefs";
 
 const languages = require('languages4translatewiki');
-const fs = require('fs');
-const path = require('path');
-const _ = require('underscore');
+import fs from 'fs';
+import path from 'path';
+import _ from 'underscore';
 const pluginDefs = require('../../static/js/pluginfw/plugin_defs');
 import existsSync from '../utils/path_exists';
-const settings = require('../utils/Settings');
+import settings from '../utils/Settings';
 
 // returns all existing messages merged together and grouped by langcode
 // {es: {"foo": "string"}, en:...}
@@ -73,7 +73,7 @@ const getAllLocales = () => {
     'for Customization for Administrators, under Localization.');
   if (settings.customLocaleStrings) {
     if (typeof settings.customLocaleStrings !== 'object') throw wrongFormatErr;
-    _.each(settings.customLocaleStrings, (overrides:MapArrayType<string> , langcode:string) => {
+    _.each(settings.customLocaleStrings, (overrides , langcode) => {
       if (typeof overrides !== 'object') throw wrongFormatErr;
       _.each(overrides, (localeString:string|object, key:string) => {
         if (typeof localeString !== 'string') throw wrongFormatErr;
@@ -106,9 +106,17 @@ const getAllLocales = () => {
 // returns a hash of all available languages availables with nativeName and direction
 // e.g. { es: {nativeName: "español", direction: "ltr"}, ... }
 const getAvailableLangs = (locales:MapArrayType<any>) => {
-  const result:MapArrayType<string> = {};
+  const unsorted:MapArrayType<string> = {};
   for (const langcode of Object.keys(locales)) {
-    result[langcode] = languages.getLanguageInfo(langcode);
+    unsorted[langcode] = languages.getLanguageInfo(langcode);
+  }
+  // Sort by native name so the language dropdown is alphabetical
+  const sorted = Object.entries(unsorted).sort(([, a]: any, [, b]: any) =>
+    (a.nativeName || '').localeCompare(b.nativeName || '', undefined, {sensitivity: 'base'})
+  );
+  const result:MapArrayType<string> = {};
+  for (const [langcode, info] of sorted) {
+    result[langcode] = info;
   }
   return result;
 };
@@ -128,6 +136,9 @@ exports.expressPreSession = async (hookName:string, {app}:any) => {
   const locales = getAllLocales();
   const localeIndex = generateLocaleIndex(locales);
   exports.availableLangs = getAvailableLangs(locales);
+  // Exported so server-rendered HTML (e.g. Open Graph meta tags) can look
+  // up translated strings without re-reading the locale files.
+  exports.locales = locales;
 
   app.get('/locales/:locale', (req:any, res:any) => {
     // works with /locale/en and /locale/en.json requests

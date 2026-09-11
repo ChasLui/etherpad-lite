@@ -9,18 +9,34 @@ const runCmd = require('../../../node/utils/run_cmd');
 const tsort = require('./tsort');
 const pluginUtils = require('./shared');
 const defs = require('./plugin_defs');
-const settings = require('../../../node/utils/Settings');
+import settings, {
+  getEpVersion,
+} from '../../../node/utils/Settings';
 
 const logger = log4js.getLogger('plugins');
 
-// Log the version of npm at startup.
+// Log the version of pnpm at startup. pnpm is only used for dev workflows
+// and plugin migration; it isn't required at runtime (admin-UI plugin
+// installs go through live-plugin-manager directly), so a missing pnpm
+// is expected on hardened/packaged installs and shouldn't produce an
+// ERROR in the logs.
+//
+// pnpm_config_pm_on_fail=ignore keeps this informational probe from failing
+// when the installed pnpm differs from package.json's "packageManager" pin:
+// by default pnpm would try to download the pinned version, which throws in
+// air-gapped/firewalled installs (ether/etherpad#7911). We only want to read
+// the local version here, never to self-provision a different one.
 (async () => {
   try {
-    const version = await runCmd(['pnpm', '--version'], {stdio: [null, 'string']});
+    const version = await runCmd(['pnpm', '--version'],
+        {stdio: [null, 'string'], env: {...process.env, pnpm_config_pm_on_fail: 'ignore'}});
     logger.info(`pnpm --version: ${version}`);
   } catch (err) {
-    logger.error(`Failed to get pnpm version: ${err.stack || err}`);
-    // This isn't a fatal error so don't re-throw.
+    if ((err as any).code === 'ENOENT') {
+      logger.debug('pnpm not found on PATH (only needed for dev workflows)');
+    } else {
+      logger.warn(`Failed to get pnpm version: ${err.stack || err}`);
+    }
   }
 })();
 
@@ -136,7 +152,7 @@ exports.getPackages = async () => {
 
   newDependencies['ep_etherpad-lite'] = {
     name: 'ep_etherpad-lite',
-    version: settings.getEpVersion(),
+    version: getEpVersion(),
     path: path.join(settings.root, 'node_modules/ep_etherpad-lite'),
     realPath: path.join(settings.root, 'src'),
   };

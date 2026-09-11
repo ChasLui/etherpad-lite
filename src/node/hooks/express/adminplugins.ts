@@ -5,9 +5,11 @@ import {ErrorCaused} from "../../types/ErrorCaused";
 import {QueryType} from "../../types/QueryType";
 
 import {getAvailablePlugins, install, search, uninstall} from "../../../static/js/pluginfw/installer";
-import {PackageData} from "../../types/PackageInfo";
+import {PackageData, PackageInfo} from "../../types/PackageInfo";
 import semver from 'semver';
 import log4js from 'log4js';
+import {MapArrayType} from "../../types/MapType";
+import settings from "../../utils/Settings";
 
 const pluginDefs = require('../../../static/js/pluginfw/plugin_defs');
 const logger = log4js.getLogger('adminPlugins');
@@ -21,7 +23,13 @@ exports.socketio = (hookName:string, args:ArgsExpressType, cb:Function) => {
     if (!isAdmin) return;
 
     const checkPluginForUpdates = async () => {
-      const results = await getAvailablePlugins(/* maxCacheAge:*/ 60 * 10);
+      let results: MapArrayType<PackageInfo>
+      try {
+        results = await getAvailablePlugins(/* maxCacheAge:*/ 60 * 10);
+      } catch (error) {
+        console.error('Error checking for plugin updates:', error);
+        return [];
+      }
       return Object.keys(pluginDefs.plugins).filter((plugin) => {
         if (!results[plugin]) return false;
 
@@ -32,35 +40,53 @@ exports.socketio = (hookName:string, args:ArgsExpressType, cb:Function) => {
       })
     }
 
+    socket.on('getStats', ()=>{
+      console.log("Getting stats for admin plugins");
+      socket.emit('results:stats', require('../../stats').toJSON());
+    })
+
     socket.on('getInstalled', async (query: string) => {
       // send currently installed plugins
       const installed =
         Object.keys(pluginDefs.plugins).map((plugin) => pluginDefs.plugins[plugin].package);
 
-      const updatable = await checkPluginForUpdates();
-
-      installed.forEach((plugin) => {
-        plugin.updatable = updatable.includes(plugin.name);
-      })
+      if (settings.privacy.pluginCatalog) {
+        const updatable = await checkPluginForUpdates();
+        installed.forEach((plugin) => {
+          plugin.updatable = updatable.includes(plugin.name);
+        })
+      }
+      // When the catalog is disabled, `updatable` simply stays unset on
+      // each installed plugin — the admin UI renders no "update available"
+      // badge, which is correct.
 
       socket.emit('results:installed', {installed});
     });
 
+
     socket.on('checkUpdates', async () => {
+      if (!settings.privacy.pluginCatalog) {
+        socket.emit('results:catalogDisabled');
+        return;
+      }
       // Check plugins for updates
       try {
-        const updatable = checkPluginForUpdates();
+        const updatable = await checkPluginForUpdates();
 
         socket.emit('results:updatable', {updatable});
       } catch (err) {
         const errc = err as ErrorCaused
         console.warn(errc.stack || errc.toString());
 
-        socket.emit('results:updatable', {updatable: {}});
+        socket.emit('results:updatable', {updatable: []});
       }
     });
 
     socket.on('getAvailable', async (query:string) => {
+      if (!settings.privacy.pluginCatalog) {
+        socket.emit('results:catalogDisabled');
+        return;
+      }
       try {
         const results = await getAvailablePlugins(/* maxCacheAge:*/ false);
         socket.emit('results:available', results);
@@ -71,6 +97,10 @@ exports.socketio = (hookName:string, args:ArgsExpressType, cb:Function) => {
     });
 
     socket.on('search', async (query: QueryType) => {
+      if (!settings.privacy.pluginCatalog) {
+        socket.emit('results:catalogDisabled');
+        return;
+      }
       try {
         if (query.searchTerm) logger.info(`Plugin search: ${query.searchTerm}'`);
         const results = await search(query.searchTerm, /* maxCacheAge:*/ 60 * 10);

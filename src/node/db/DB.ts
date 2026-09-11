@@ -21,8 +21,8 @@
  * limitations under the License.
  */
 
-import {Database} from 'ueberdb2';
-const settings = require('../utils/Settings');
+import type {DatabaseType} from 'ueberdb2';
+import settings from '../utils/Settings';
 import log4js from 'log4js';
 const stats = require('../stats')
 
@@ -37,7 +37,9 @@ exports.db = null;
  * Initializes the database with the settings provided by the settings module
  */
 exports.init = async () => {
-  exports.db = new Database(settings.dbType, settings.dbSettings, null, logger);
+  // ueberdb2 v6 is ESM-only; load via dynamic import so CJS consumers work.
+  const {Database} = await import('ueberdb2');
+  exports.db = new Database(settings.dbType as DatabaseType, settings.dbSettings, null, logger);
   await exports.db.init();
   if (exports.db.metrics != null) {
     for (const [metric, value] of Object.entries(exports.db.metrics)) {
@@ -45,8 +47,13 @@ exports.init = async () => {
       stats.gauge(`ueberdb_${metric}`, () => exports.db.metrics[metric]);
     }
   }
-  for (const fn of ['get', 'set', 'findKeys', 'getSub', 'setSub', 'remove']) {
+  for (const fn of ['get', 'set', 'findKeys', 'findKeysPaged', 'getSub', 'setSub', 'remove']) {
     const f = exports.db[fn];
+    if (typeof f !== 'function') {
+      throw new Error(
+        `ueberdb2 ${exports.db.constructor.name} is missing required method ${fn}; ` +
+          'check that ueberdb2 is at the minimum version pinned in package.json');
+    }
     exports[fn] = async (...args:string[]) => await f.call(exports.db, ...args);
     Object.setPrototypeOf(exports[fn], Object.getPrototypeOf(f));
     Object.defineProperties(exports[fn], Object.getOwnPropertyDescriptors(f));

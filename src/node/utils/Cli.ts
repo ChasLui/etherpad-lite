@@ -21,33 +21,38 @@
  */
 
 // An object containing the parsed command-line options
-exports.argv = {};
 
-const argv = process.argv.slice(2);
-let arg, prevArg;
+export const argv: Record<string, string> = {};
+
+const argvInternal = process.argv.slice(2);
+let arg, prevArg = "";
 
 // Loop through args
-for (let i = 0; i < argv.length; i++) {
-  arg = argv[i];
+for (let i = 0; i < argvInternal.length; i++) {
+  arg = argvInternal[i];
 
   // Override location of settings.json file
-  if (prevArg === '--settings' || prevArg === '-s') {
-    exports.argv.settings = arg;
+  if (prevArg && prevArg === '--settings' || prevArg === '-s') {
+    console.log("Using specified settings from command line");
+    argv.settings = arg;
   }
 
   // Override location of credentials.json file
-  if (prevArg === '--credentials') {
-    exports.argv.credentials = arg;
+  if (prevArg && prevArg === '--credentials') {
+    console.log("Using specified credentials from command line");
+    argv.credentials = arg;
   }
 
   // Override location of settings.json file
-  if (prevArg === '--sessionkey') {
-    exports.argv.sessionkey = arg;
+  if (prevArg && prevArg === '--sessionkey') {
+    console.log("Using specified session key from command line");
+    argv.sessionkey = arg;
   }
 
   // Override location of APIKEY.txt file
-  if (prevArg === '--apikey') {
-    exports.argv.apikey = arg;
+  if (prevArg && prevArg === '--apikey') {
+    console.log("Using specified API key from command line");
+    argv.apikey = arg;
   }
 
   prevArg = arg;

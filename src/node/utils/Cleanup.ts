@@ -3,15 +3,16 @@
 import {AChangeSet} from "../types/PadType";
 import {Revision} from "../types/Revision";
 
-const promises = require('./promises');
+import {timesLimit, firstSatisfies} from './promises';
 const padManager = require('ep_etherpad-lite/node/db/PadManager');
 const db = require('ep_etherpad-lite/node/db/DB');
 const Changeset = require('ep_etherpad-lite/static/js/Changeset');
 const padMessageHandler = require('ep_etherpad-lite/node/handler/PadMessageHandler');
-const log4js = require('log4js');
+import log4js from 'log4js';
 const logger = log4js.getLogger('cleanup');
 
-exports.deleteAllRevisions = async (padID: string): Promise<void> => {
+
+export const deleteAllRevisions = async (padID: string): Promise<void> => {
 
   const randomPadId = padID + 'aertdfdf' + Math.random().toString(10)
 
@@ -39,11 +40,27 @@ const createRevision = async (aChangeset: AChangeSet, timestamp: number, isKeyRe
   };
 }
 
-exports.deleteRevisions = async (padId: string, keepRevisions: number): Promise<boolean> => {
+export const deleteRevisions = async (padId: string, keepRevisions: number): Promise<boolean> => {
 
   logger.debug('Start cleanup revisions', padId)
 
   let pad = await padManager.getPad(padId);
+
+  // Report a damaged history as a damaged history. check() detects it too,
+  // but only as `assert(timestamp != null)` part-way through replaying the
+  // revisions, which tells an operator nothing about which record is bad or
+  // what to do about it. See #8134.
+  const missing = await pad.findMissingRevisions();
+  if (missing.length > 0) {
+    throw new Error(
+        `Pad ${padId} is missing revision(s) ${missing.join(', ')}` +
+        `${missing.length >= 20 ? ' (and possibly more)' : ''}. ` +
+        'Its history cannot be replayed, so revisions cannot be cleaned up. ' +
+        "The pad's current text is unaffected. Rebuild the history with a " +
+        'full compaction (compactPad with no keepRevisions) to make the pad ' +
+        'cleanable again.');
+  }
+
   await pad.check()
 
   logger.debug('Initial pad is valid')
@@ -55,37 +72,43 @@ exports.deleteRevisions = async (padId: string, keepRevisions: number): Promise<
 
   padMessageHandler.kickSessionsFromPad(padId)
 
+  try {
+    return await rebuildHistory(pad, padId, keepRevisions)
+  } finally {
+    // Always drop the cached Pad, success or failure. It still carries the
+    // pre-cleanup head, and if cleanup failed after the pad record was
+    // rewritten, an edit through that stale object would append at the OLD
+    // head -- persisting a head far past the rebuilt history and punching a
+    // run of holes that no later cleanup can repair. See #8134.
+    padManager.unloadPad(padId);
+  }
+}
+
+const rebuildHistory = async (pad: any, padId: string, keepRevisions: number): Promise<boolean> => {
   const cleanupUntilRevision = pad.head - keepRevisions
   logger.debug('Composing changesets: ', cleanupUntilRevision)
   const changeset = await padMessageHandler.composePadChangesets(pad, 0, cleanupUntilRevision + 1)
 
   const revisions: Revision[] = [];
 
-  await promises.timesLimit(keepRevisions + 1, 500, async (i: number) => {
+  await timesLimit(keepRevisions + 1, 500, async (i: number) => {
     const rev = i + cleanupUntilRevision
     revisions[rev] = await pad.getRevision(rev)
   });
 
   logger.debug('Loaded revisions: ', revisions.length)
 
-  await promises.timesLimit(pad.head + 1, 500, async (i: string) => {
-    await db.remove(`pad:${padId}:revs:${i}`, null);
-  });
+  const oldHead = pad.head
 
-  let padContent = await db.get(`pad:${padId}`)
-  padContent.head = keepRevisions
-  if (padContent.savedRevisions) {
-    let newSavedRevisions = []
-
-    for (let i = 0; i < padContent.savedRevisions.length; i++) {
-      if (padContent.savedRevisions[i].revNum > cleanupUntilRevision) {
-        padContent.savedRevisions[i].revNum = padContent.savedRevisions[i].revNum - cleanupUntilRevision
-        newSavedRevisions.push(padContent.savedRevisions[i])
-      }
-    }
-    padContent.savedRevisions = newSavedRevisions
-  }
-  await db.set(`pad:${padId}`, padContent);
+  // Order matters. This used to remove every revision 0..head first and only
+  // then write the replacements, so any failure in that window left the pad
+  // with holes -- or with no history at all -- while the pad record still
+  // claimed them. Instead: write the rebuilt history, then move head onto it,
+  // then drop what is left over.
+  //
+  // Overwriting revisions 0..keepRevisions in place is safe because
+  // everything needed to rebuild them is already in memory above
+  // (`changeset` and `revisions`); nothing is read back from those keys.
 
   let newAText = Changeset.makeAText('\n');
   let pool = pad.apool()
@@ -105,7 +128,7 @@ exports.deleteRevisions = async (padId: string, keepRevisions: number): Promise<
 
   p.push(db.set(`pad:${padId}:revs:0`, revision))
 
-  p.push(promises.timesLimit(keepRevisions, 500, async (i: number) => {
+  p.push(timesLimit(keepRevisions, 500, async (i: number) => {
     const rev = i + cleanupUntilRevision + 1
     const newRev = rev - cleanupUntilRevision;
 
@@ -125,8 +148,37 @@ exports.deleteRevisions = async (padId: string, keepRevisions: number): Promise<
 
   await Promise.all(p)
 
+  // The rebuilt history is durable; point the pad at it.
+  let padContent = await db.get(`pad:${padId}`)
+  padContent.head = keepRevisions
+  if (padContent.savedRevisions) {
+    let newSavedRevisions = []
+
+    for (let i = 0; i < padContent.savedRevisions.length; i++) {
+      if (padContent.savedRevisions[i].revNum > cleanupUntilRevision) {
+        padContent.savedRevisions[i].revNum = padContent.savedRevisions[i].revNum - cleanupUntilRevision
+        newSavedRevisions.push(padContent.savedRevisions[i])
+      }
+    }
+    padContent.savedRevisions = newSavedRevisions
+  }
+  await db.set(`pad:${padId}`, padContent);
+
+  // Only now drop the revisions the new head no longer references. These are
+  // orphans: check() walks 0..head, so if this part fails it wastes space
+  // without making the pad inconsistent.
+  if (oldHead > keepRevisions) {
+    await timesLimit(oldHead - keepRevisions, 500, async (i: number) => {
+      await db.remove(`pad:${padId}:revs:${keepRevisions + 1 + i}`, null);
+    });
+  }
+
   logger.debug('Finished migration. Checking pad now')
 
+  // Drop the cached Pad before re-reading: it still carries the pre-cleanup
+  // head, and verifying against that would walk revisions this cleanup just
+  // removed. (The caller's `finally` unloads it again; this one has to happen
+  // here so the verification below reads from storage.)
   padManager.unloadPad(padId);
 
   let newPad = await padManager.getPad(padId);
@@ -135,7 +187,7 @@ exports.deleteRevisions = async (padId: string, keepRevisions: number): Promise<
   return true
 }
 
-exports.checkTodos = async () => {
+export const checkTodos = async () => {
   await new Promise(resolve => setTimeout(resolve, 5000));
 
   // TODO: Move to settings
@@ -156,7 +208,7 @@ exports.checkTodos = async () => {
     }
 
     try {
-      const result = await exports.deleteRevisions(padId, settings.keepRevisions)
+      const result = await deleteRevisions(padId, settings.keepRevisions)
       if (result) {
         logger.info('successful cleaned up pad: ', padId)
       }

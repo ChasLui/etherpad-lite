@@ -2,10 +2,10 @@
 import {ArgsExpressType} from "../../types/ArgsExpressType";
 import path from "path";
 import fs from "fs";
-import * as url from "node:url";
 import {MapArrayType} from "../../types/MapType";
 
-const settings = require('ep_etherpad-lite/node/utils/Settings');
+import settings from 'ep_etherpad-lite/node/utils/Settings';
+import {sanitizeProxyPath} from '../../utils/sanitizeProxyPath';
 
 const ADMIN_PATH = path.join(settings.root, 'src', 'templates');
 const PROXY_HEADER = "x-proxy-path"
@@ -22,11 +22,15 @@ exports.expressCreateServer = (hookName: string, args: ArgsExpressType, cb: Func
     console.error('admin template not found, skipping admin interface. You need to rebuild it in /admin with pnpm run build-copy')
     return cb();
   }
-  args.app.get('/admin/*', (req: any, res: any) => {
-    // parse URL
-    const parsedUrl = url.parse(req.url);
+  args.app.get('/admin/{*filename}', (req: any, res: any) => {
     // extract URL path
-    let pathname = ADMIN_PATH + `${parsedUrl.pathname}`;
+    let pathname = path.join(ADMIN_PATH, req.url);
+    pathname = path.normalize(pathname)
+
+    if (!pathname.startsWith(ADMIN_PATH)) {
+      res.statusCode = 403;
+      return res.end("Forbidden");
+    }
     // based on the URL path, extract the file extension. e.g. .js, .doc, ...
     let ext = path.parse(pathname).ext;
     // maps file extension to MIME typere
@@ -54,7 +58,7 @@ exports.expressCreateServer = (hookName: string, args: ArgsExpressType, cb: Func
       }
 
       // if is a directory search for index file matching the extension
-      if (fs.statSync(pathname).isDirectory()) {
+      if (exist && fs.statSync(pathname).isDirectory()) {
         pathname = pathname + '/index.html';
         ext = path.parse(pathname).ext;
       }
@@ -62,18 +66,29 @@ exports.expressCreateServer = (hookName: string, args: ArgsExpressType, cb: Func
       // read file from file system
       fs.readFile(pathname, function (err, data) {
         if (err) {
+          // Log the detailed error server-side; return a generic message to the
+          // client rather than echoing the filesystem error.
+          console.error(`admin: error reading ${pathname}: ${err}`);
           res.statusCode = 500;
-          res.end(`Error getting the file: ${err}.`);
+          res.end('Error getting the file.');
         } else {
           let dataToSend:Buffer|string = data
           // if the file is found, set Content-type and send data
           res.setHeader('Content-type', map[ext] || 'text/plain');
           if (ext === ".html" || ext === ".js" || ext === ".css") {
-            if (req.header(PROXY_HEADER)) {
+            // The proxy-path header is woven into the response body, so
+            // it must be sanitised before substitution and downstream
+            // caches must not collapse responses across different
+            // header values.
+            const proxyPath = sanitizeProxyPath(req);
+            if (proxyPath) {
               let string = data.toString()
-              dataToSend = string.replaceAll("/admin", req.header(PROXY_HEADER) + "/admin")
-              dataToSend = dataToSend.replaceAll("/socket.io", req.header(PROXY_HEADER) + "/socket.io")
+              dataToSend = string.replaceAll("/admin", proxyPath + "/admin")
+              dataToSend = dataToSend.replaceAll(
+                  "/socket.io", proxyPath + "/socket.io")
             }
+            res.setHeader('Vary', 'x-proxy-path');
+            res.setHeader('Cache-Control', 'private, no-store');
           }
           res.end(dataToSend);
         }

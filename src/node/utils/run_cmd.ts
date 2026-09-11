@@ -5,10 +5,10 @@ import {ChildProcess} from "node:child_process";
 import {PromiseWithStd} from "../types/PromiseWithStd";
 import {Readable} from "node:stream";
 
-const spawn = require('cross-spawn');
-const log4js = require('log4js');
-const path = require('path');
-const settings = require('./Settings');
+import spawn from 'cross-spawn';
+import log4js from 'log4js';
+import path from 'path';
+import settings from './Settings';
 
 const logger = log4js.getLogger('runCmd');
 
@@ -123,7 +123,7 @@ module.exports = exports = (args: string[], opts:RunCMDOptions = {}) => {
   // process's `exit` handler so that we get a useful stack trace.
   const procFailedErr: Error & ErrorExtended = new Error();
 
-  const proc: ChildProcess = spawn(args[0], args.slice(1), opts);
+  const proc: ChildProcess = spawn(args[0], args.slice(1), opts as any);
   const streams:[undefined, Readable|null, Readable|null] = [undefined, proc.stdout, proc.stderr];
 
   let px: { reject: any; resolve: any; };
@@ -145,6 +145,18 @@ module.exports = exports = (args: string[], opts:RunCMDOptions = {}) => {
       })();
     }
   }
+
+  // Without this, a spawn failure (e.g. ENOENT for a missing binary) is
+  // emitted as an 'error' event with no listener, which Node.js treats as
+  // an uncaught exception that bypasses any try/catch around the awaited
+  // promise and kills the process. Reject the promise instead so callers
+  // can handle it.
+  proc.on('error', (err) => {
+    procFailedErr.message = `Failed to spawn ${args[0]}: ${(err as Error).message}`;
+    procFailedErr.code = (err as any).code;
+    logger.debug(procFailedErr.stack);
+    px.reject(procFailedErr);
+  });
 
   proc.on('exit', async (code, signal) => {
     const [, stdout] = await Promise.all(stdioStringPromises);

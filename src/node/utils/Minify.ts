@@ -26,7 +26,7 @@ import mime from 'mime-types';
 import log4js from 'log4js';
 import {compressCSS, compressJS} from './MinifyWorker'
 
-const settings = require('./Settings');
+import settings from './Settings';
 import {promises as fs} from 'fs';
 import path from 'node:path';
 const plugins = require('../../static/js/pluginfw/plugin_defs');
@@ -39,11 +39,9 @@ const ROOT_DIR = path.join(settings.root, 'src/static/');
 const LIBRARY_WHITELIST = [
   'async',
   'js-cookie',
-  'security',
   'split-grid',
   'tinycon',
   'underscore',
-  'unorm',
 ];
 
 // What follows is a terrible hack to avoid loop-back within the server.
@@ -146,7 +144,7 @@ const compatPaths = {
  * @param res the Express response
  */
 const _minify = async (req:any, res:any) => {
-  let filename = req.params.filename;
+  let filename = req.params.filename.join('/');
   try {
     filename = sanitizePathname(filename);
   } catch (err) {
@@ -179,13 +177,18 @@ const _minify = async (req:any, res:any) => {
       const plugin = plugins.plugins[library];
       const pluginPath = plugin.package.realPath;
       filename = path.join(pluginPath, libraryPath);
-      // On Windows, path.relative converts forward slashes to backslashes. Convert them back
-      // because some of the code below assumes forward slashes. Node.js treats both the backlash
-      // and the forward slash characters as pathname component separators on Windows so this does
-      // not change the meaning of the pathname. This conversion does not introduce a directory
-      // traversal vulnerability because all '..\\' substrings have already been removed by
-      // sanitizePathname.
-      filename = filename.replace(/\\/g, '/');
+      // On Windows, path.join converts forward slashes to backslashes. Convert them back because
+      // some of the code below assumes forward slashes. Node.js treats both the backslash and the
+      // forward slash characters as pathname component separators on Windows so this does not
+      // change the meaning of the pathname on Windows.
+      //
+      // THIS CONVERSION MUST ONLY BE DONE ON WINDOWS. On POSIX systems a backslash is an ordinary
+      // filename byte, not a separator, so sanitizePathname() deliberately leaves '..\\' segments
+      // untouched (they are harmless there). Replacing '\\' with '/' unconditionally would turn
+      // those already-sanitized bytes back into '../' path components *after* the traversal check
+      // has run, reintroducing a directory-traversal / arbitrary-file-read vulnerability
+      // (GHSA-mc8w-wjhw-45x5).
+      if (path.sep === '\\') filename = filename.replace(/\\/g, '/');
     } else if (LIBRARY_WHITELIST.indexOf(library) !== -1) {
       // Go straight into node_modules
       // Avoid `require.resolve()`, since 'mustache' and 'mustache/index.js'
